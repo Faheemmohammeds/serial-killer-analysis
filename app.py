@@ -13,7 +13,20 @@ st.set_page_config(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CLEAN_CSV_PATH = os.path.join(BASE_DIR, "data", "cleaned_serial_killers_dataset.csv")
+
+
+def find_file(base_dir: str, filename: str):
+    """Search the repo for a file, case-insensitively. Returns the path or None."""
+    for root, dirs, files in os.walk(base_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in files:
+            if name.lower() == filename.lower():
+                return os.path.join(root, name)
+    return None
+
+
+CSV_NAME = "cleaned_serial_killers_dataset.csv"
+CLEAN_CSV_PATH = find_file(BASE_DIR, CSV_NAME)
 
 
 # ---------------------------------------------------------
@@ -27,14 +40,18 @@ def load_data(path: str) -> pd.DataFrame:
 st.title("📊 Criminological Research Dashboard")
 st.caption("Wikipedia & Kaggle research dataset, for academic study and objective data analysis.")
 
-if not os.path.exists(CLEAN_CSV_PATH):
-    st.error(
-        f"Dataset not found at: {CLEAN_CSV_PATH}\n\n"
-        "Make sure `data/cleaned_serial_killers_dataset.csv` exists in your repository."
-    )
-    df = pd.DataFrame()
-else:
+df = pd.DataFrame()
+
+if CLEAN_CSV_PATH:
     df = load_data(CLEAN_CSV_PATH)
+else:
+    st.warning(
+        f"`{CSV_NAME}` was not found in the repository. "
+        "Commit it to your GitHub repo (e.g. in a `data/` folder), or upload it below."
+    )
+    uploaded = st.file_uploader("Upload the cleaned CSV", type="csv")
+    if uploaded is not None:
+        df = pd.read_csv(uploaded)
 
 # ---------------------------------------------------------
 # Tabs
@@ -80,8 +97,7 @@ with tab_explore:
             st.markdown("#### Category counts")
             if cat_cols:
                 cat = st.selectbox("Choose a categorical column", cat_cols, key="cat_select")
-                counts = df[cat].value_counts().head(20)
-                st.bar_chart(counts)
+                st.bar_chart(df[cat].value_counts().head(20))
             else:
                 st.info("No suitable categorical columns found.")
 
@@ -109,9 +125,8 @@ with tab_downloads:
     with d_col1:
         st.markdown("#### 📄 Reports & Documentation")
 
-        # Markdown report
-        report_path = os.path.join(BASE_DIR, "REPORT.md")
-        if os.path.exists(report_path):
+        report_path = find_file(BASE_DIR, "REPORT.md")
+        if report_path:
             with open(report_path, "rb") as f:
                 st.download_button(
                     "📝 Download Markdown Report (REPORT.md)",
@@ -122,39 +137,10 @@ with tab_downloads:
                     key="dl_report",
                 )
         else:
-            st.caption("REPORT.md not found.")
+            st.caption("REPORT.md not found in the repository.")
 
-    with d_col2:
-        st.markdown("#### 💻 Code & Clean Datasets")
-
-        # Cleaned CSV
-        if os.path.exists(CLEAN_CSV_PATH):
-            with open(CLEAN_CSV_PATH, "rb") as f:
-                st.download_button(
-                    "💾 Download Cleaned Dataset (.csv)",
-                    data=f.read(),
-                    file_name="cleaned_serial_killers_dataset.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    key="dl_csv",
-                )
-
-        # Jupyter Notebook
-        nb_path = os.path.join(BASE_DIR, "serial_killers_analysis_notebook.ipynb")
-        if os.path.exists(nb_path):
-            with open(nb_path, "rb") as f:
-                st.download_button(
-                    "📓 Download Annotated Jupyter Notebook (.ipynb)",
-                    data=f.read(),
-                    file_name="serial_killers_analysis_notebook.ipynb",
-                    mime="application/x-ipynb+json",
-                    use_container_width=True,
-                    key="dl_notebook",
-                )
-
-        # Project README
-        readme_path = os.path.join(BASE_DIR, "README.md")
-        if os.path.exists(readme_path):
+        readme_path = find_file(BASE_DIR, "README.md")
+        if readme_path:
             with open(readme_path, "rb") as f:
                 st.download_button(
                     "📖 Download Project Documentation (README.md)",
@@ -163,6 +149,31 @@ with tab_downloads:
                     mime="text/markdown",
                     use_container_width=True,
                     key="dl_readme",
+                )
+
+    with d_col2:
+        st.markdown("#### 💻 Code & Clean Datasets")
+
+        if not df.empty:
+            st.download_button(
+                "💾 Download Cleaned Dataset (.csv)",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name=CSV_NAME,
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_csv",
+            )
+
+        nb_path = find_file(BASE_DIR, "serial_killers_analysis_notebook.ipynb")
+        if nb_path:
+            with open(nb_path, "rb") as f:
+                st.download_button(
+                    "📓 Download Annotated Jupyter Notebook (.ipynb)",
+                    data=f.read(),
+                    file_name="serial_killers_analysis_notebook.ipynb",
+                    mime="application/x-ipynb+json",
+                    use_container_width=True,
+                    key="dl_notebook",
                 )
 
 # ---------------------------------------------------------
