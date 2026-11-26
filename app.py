@@ -1,5 +1,7 @@
 import os
+import re
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -13,6 +15,7 @@ st.set_page_config(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_NAME = "cleaned_serial_killers_dataset.csv"
 
 
 def find_file(base_dir: str, filename: str):
@@ -25,18 +28,94 @@ def find_file(base_dir: str, filename: str):
     return None
 
 
-CSV_NAME = "cleaned_serial_killers_dataset.csv"
 CLEAN_CSV_PATH = find_file(BASE_DIR, CSV_NAME)
 
 
 # ---------------------------------------------------------
-# Data loading
+# Data cleaning helpers
 # ---------------------------------------------------------
+def clean_gender(x) -> str:
+    """Map free-text gender descriptions to Male / Female / Both / Unknown."""
+    if pd.isna(x):
+        return "Unknown"
+    s = str(x).strip().lower()
+    has_female = "female" in s or bool(re.search(r"\b(f|woman|women)\b", s))
+    # remove 'female' first so 'male' is not matched inside it
+    s_no_female = s.replace("female", "")
+    has_male = "male" in s_no_female or bool(re.search(r"\b(m|man|men)\b", s_no_female))
+    if has_female and has_male:
+        return "Both"
+    if has_female:
+        return "Female"
+    if has_male:
+        return "Male"
+    return "Unknown"
+
+
+def to_year(x):
+    """Turn 1985, 1985.0, '1985', 'c. 1985', '1985-1990' into an integer year (first one found)."""
+    if pd.isna(x):
+        return pd.NA
+    m = re.search(r"(1[0-9]{3}|20[0-9]{2})", str(x))
+    return int(m.group(1)) if m else pd.NA
+
+
+def is_year_col(name: str) -> bool:
+    return "year" in name.lower()
+
+
+def tidy_numeric(s: pd.Series) -> pd.Series:
+    """Convert to numbers; if every value is whole, store as integers (5.0 -> 5)."""
+    s = pd.to_numeric(s, errors="coerce")
+    non_null = s.dropna()
+    if len(non_null) and (non_null % 1 == 0).all():
+        return s.round().astype("Int64")
+    return s
+
+
+def prepare_data(raw: pd.DataFrame) -> pd.DataFrame:
+    df = raw.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # 1) Clean text columns (trim spaces, blanks -> missing)
+    for c in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = df[c].astype("string").str.strip()
+            df[c] = df[c].replace({"": pd.NA, "nan": pd.NA, "NaN": pd.NA, "None": pd.NA})
+
+    # 2) Fix year columns -> integer years, no decimals
+    for c in df.columns:
+        if is_year_col(c):
+            df[c] = pd.array([to_year(v) for v in df[c]], dtype="Int64")
+
+    # 3) Fix other numeric columns (floats that are really whole numbers, numbers stored as text)
+    for c in df.columns:
+        if is_year_col(c):
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = tidy_numeric(df[c])
+        else:
+            converted = pd.to_numeric(df[c], errors="coerce")
+            non_null = df[c].notna().sum()
+            if non_null and converted.notna().sum() / non_null >= 0.9:
+                df[c] = tidy_numeric(converted)
+
+    # 4) Rebuild a proper gender column from gender_profile (keeps all categories)
+    profile_col = next((c for c in df.columns if c.lower() == "gender_profile"), None)
+    if profile_col:
+        df["gender_clean"] = df[profile_col].apply(clean_gender)
+
+    return df
+
+
 @st.cache_data
 def load_data(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
+    return prepare_data(pd.read_csv(path))
 
 
+# ---------------------------------------------------------
+# Load data
+# ---------------------------------------------------------
 st.title("📊 Criminological Research Dashboard")
 st.caption("Wikipedia & Kaggle research dataset, for academic study and objective data analysis.")
 
@@ -51,7 +130,17 @@ else:
     )
     uploaded = st.file_uploader("Upload the cleaned CSV", type="csv")
     if uploaded is not None:
-        df = pd.read_csv(uploaded)
+        df = prepare_data(pd.read_csv(uploaded))
+
+year_cols = [c for c in df.columns if is_year_col(c)]
+numeric_cols = [
+    c for c in df.columns
+    if pd.api.types.is_numeric_dtype(df[c]) and c not in year_cols
+]
+cat_cols = [
+    c for c in df.columns
+    if not pd.api.types.is_numeric_dtype(df[c]) and df[c].nunique() <= 50
+]
 
 # ---------------------------------------------------------
 # Tabs
@@ -75,8 +164,32 @@ with tab_overview:
         st.markdown("#### Data preview")
         st.dataframe(df.head(50), use_container_width=True)
 
-        st.markdown("#### Summary statistics")
-        st.dataframe(df.describe(include="all").T, use_container_width=True)
+        if numeric_cols:
+            st.markdown("#### Numeric summary")
+            st.dataframe(df[numeric_cols].describe().T, use_container_width=True)
+
+        if year_cols:
+            st.markdown("#### Year columns (earliest, latest, median)")
+            rows = []
+            for c in year_cols:
+                s = df[c].dropna().astype(int)
+                if len(s):
+                    rows.append(
+                        {"column": c, "earliest": int(s.min()), "latest": int(s.max()),
+                         "median": int(s.median()), "records with a year": len(s)}
+                    )
+            if rows:
+                st.dataframe(pd.DataFrame(rows).set_index("column"), use_container_width=True)
+
+        with st.expander("🛠 Data quality check"):
+            st.write("Loaded from:", CLEAN_CSV_PATH or "uploaded file")
+            st.markdown("**Column types**")
+            st.dataframe(df.dtypes.astype(str).rename("dtype"), use_container_width=True)
+            for col in df.columns:
+                if "gender" in col.lower():
+                    st.markdown(f"**Value counts: {col}**")
+                    st.dataframe(df[col].value_counts(dropna=False).rename("count"),
+                                 use_container_width=True)
 
 # ---------------------------------------------------------
 # Explore
@@ -85,19 +198,15 @@ with tab_explore:
     if df.empty:
         st.info("No data loaded.")
     else:
-        numeric_cols = df.select_dtypes(include="number").columns.tolist()
-        cat_cols = [
-            c for c in df.select_dtypes(exclude="number").columns
-            if df[c].nunique() <= 50
-        ]
-
         e1, e2 = st.columns(2)
 
         with e1:
             st.markdown("#### Category counts")
             if cat_cols:
-                cat = st.selectbox("Choose a categorical column", cat_cols, key="cat_select")
-                st.bar_chart(df[cat].value_counts().head(20))
+                default = cat_cols.index("gender_clean") if "gender_clean" in cat_cols else 0
+                cat = st.selectbox("Choose a categorical column", cat_cols,
+                                   index=default, key="cat_select")
+                st.bar_chart(df[cat].value_counts(dropna=False).head(20))
             else:
                 st.info("No suitable categorical columns found.")
 
@@ -105,7 +214,7 @@ with tab_explore:
             st.markdown("#### Numeric distribution")
             if numeric_cols:
                 num = st.selectbox("Choose a numeric column", numeric_cols, key="num_select")
-                series = df[num].dropna()
+                series = df[num].dropna().astype(float)
                 if series.nunique() > 1:
                     hist = pd.cut(series, bins=15).value_counts().sort_index()
                     hist.index = hist.index.astype(str)
@@ -114,6 +223,17 @@ with tab_explore:
                     st.info("Not enough variation to plot.")
             else:
                 st.info("No numeric columns found.")
+
+        if year_cols:
+            st.markdown("#### Cases by decade")
+            ycol = st.selectbox("Choose a year column", year_cols, key="year_select")
+            years = df[ycol].dropna().astype(int)
+            if len(years):
+                by_decade = (years // 10 * 10).value_counts().sort_index()
+                by_decade.index = [f"{d}s" for d in by_decade.index]
+                st.bar_chart(by_decade)
+            else:
+                st.info("No valid years in this column.")
 
 # ---------------------------------------------------------
 # Downloads
